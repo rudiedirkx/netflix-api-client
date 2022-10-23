@@ -1,0 +1,21 @@
+{
+    "name": "rdx/netflix-user-api",
+    "description": "Fake API client for Netflix user data",
+    "type": "library",
+    "require": {
+        "rdx/js-dom": "^1.4",
+        "guzzlehttp/guzzle": "^7.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "rdx\\netflix\\": "src/"
+        }
+    },
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Rudie Dirkx",
+            "email": "github@hotblocks.nl"
+        }
+    ]
+}
