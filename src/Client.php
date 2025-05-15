@@ -3,6 +3,7 @@
 namespace rdx\netflix;
 
 use GuzzleHttp\Client as Guzzle;
+use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\RedirectMiddleware;
 use rdx\jsdom\Node;
 
@@ -12,6 +13,10 @@ class Client {
 	protected Guzzle $guzzle;
 
 	public ?string $accountEmail = null;
+	public array $profiles;
+	public array $myList;
+
+	public array $_requests = [];
 
 	public function __construct(Auth $auth) {
 		$this->auth = $auth;
@@ -25,9 +30,58 @@ class Client {
 		]);
 	}
 
+	public function getProfiles() : array {
+		if (isset($this->profiles)) return $this->profiles;
+
+		$data = $this->getFalcorCache("https://www.netflix.com/browse/my-list", 'profiles');
+
+		$profiles = [];
+		foreach ($data['profiles'] as $info) {
+			$id = $info['summary']['value']['guid'];
+			$name = $info['summary']['value']['profileName'];
+			$profiles[$id] = $name;
+		}
+
+		return $this->profiles = $profiles;
+	}
+
+	public function chooseProfile(string $id) : void {
+		$profiles = $this->getProfiles();
+		if (!isset($profiles[$id])) {
+			$matches = array_filter($profiles, fn($name) => $name == $id);
+			if (count($matches) != 1) {
+				throw new RuntimeException("Invalid profile: $id");
+			}
+			$id = key($matches);
+		}
+// dump($id);
+
+		$rsp = $this->get('https://www.netflix.com/SwitchProfile?next=/browse/my-list&tkn=' . urlencode($id));
+
+		// $html = (string) $rsp->getBody();
+		// $doc = Node::create($html);
+		// $this->myList = $this->extractMyList($doc);
+	}
+
 	public function getMyList() : array {
-		$videos = $this->getRawMyList();
-		if (!$videos) return [];
+		if (isset($this->myList)) return $this->myList;
+
+		$rsp = $this->get('https://www.netflix.com/browse/my-list');
+		$html = (string) $rsp->getBody();
+		$doc = Node::create($html);
+		return $this->myList = $this->extractMyList($doc);
+	}
+
+	protected function extractMyList(Node $doc) : array {
+		$data = $this->extractFalcorCache($doc, 'mylist');
+// dump($data);
+
+		$videos = [];
+		foreach ($data['mylist'] as $i => $item) {
+			if (is_numeric($i) && ($item['$type'] ?? '') === 'ref' && ($item['value'][0] ?? '') === 'videos') {
+				$videos[] = $data['videos'][ $item['value'][1] ];
+			}
+		}
 
 		return array_map(function(array $video) {
 			$summary = $video['itemSummary']['value'];
@@ -37,18 +91,6 @@ class Client {
 
 			return new TitleInfo($summary['id'], $summary['title']);
 		}, $videos);
-	}
-
-	protected function getRawMyList() : ?array {
-		$data = $this->getFalcorCache("https://www.netflix.com/browse/my-list", 'mylist');
-		if (!is_array($data)) return null;
-
-		$videos = [];
-		foreach ($data['mylist'] as $i => $item) {
-			if (is_numeric($i) && ($item['$type'] ?? '') === 'ref' && ($item['value'][0] ?? '') === 'videos') {
-				$videos[] = $data['videos'][ $item['value'][1] ];
-			}
-		}
 
 		return $videos;
 	}
@@ -87,10 +129,14 @@ class Client {
 	}
 
 	protected function getFalcorCache(string $url, string $test) : ?array {
-		$rsp = $this->guzzle->get($url);
+		$rsp = $this->get($url);
 		$html = (string) $rsp->getBody();
+// file_put_contents(__DIR__ . "/../$test.html", $html);
 		$doc = Node::create($html);
+		return $this->extractFalcorCache($doc, $test);
+	}
 
+	protected function extractFalcorCache(Node $doc, string $test) : ?array {
 		$scripts = $doc->queryAll('script');
 		foreach ($scripts as $el) {
 			$script = $el->textContent;
@@ -117,7 +163,7 @@ class Client {
 	}
 
 	protected function checkSession() : bool {
-		$rsp = $this->guzzle->get('https://www.netflix.com/YourAccount');
+		$rsp = $this->get('https://www.netflix.com/account/security');
 
 		$redirects = $rsp->getHeader(RedirectMiddleware::HISTORY_HEADER);
 		if (count($redirects)) {
@@ -125,27 +171,28 @@ class Client {
 		}
 
 		$html = (string) $rsp->getBody();
-		if (strpos($html, '"account-email"') === false) {
+		if (!preg_match('#"profileEmailAddress": *("[^"]+"),#', $html, $match)) {
 			return false;
 		}
 
-		$doc = Node::create($html);
-
-		$email = $doc->query('[data-uia="account-email"]');
-		if (!$email) {
-			return false;
-		}
-		$email = $email->textContent;
-
-		$profiles = $doc->queryAll('.profile-hub h3');
-		if (!count($profiles)) {
-			return false;
-		}
-		$profiles = array_map(fn($el) => $el->textContent, $profiles);
+		$email = json_decode(strtr($match[1], ['\\x40' => '@']));
 
 		$this->accountEmail = $email;
 
 		return true;
+	}
+
+	public function get(string $url) : Response {
+		$t = hrtime(true);
+		try {
+			$rsp = $this->guzzle->get($url);
+		}
+		finally {
+			$t = (hrtime(true) - $t) / 1e9;
+			$this->_requests[] = ['GET', $url, $t];
+		}
+
+		return $rsp;
 	}
 
 }
